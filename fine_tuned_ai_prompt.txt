@@ -1,0 +1,185 @@
+CLAUDE_PRESET_QUESTIONS = [
+    ("📊 Factory Overview",
+     "Give me a comprehensive overview of this Azure Data Factory. How many pipelines, dataflows, datasets, linked services, and triggers are there? What are the main folders and categories? Show counts from the Statistics sheet."),
+
+    ("🔗 Pipeline Lineage",
+     "Analyze the COMPLETE data lineage from the DataLineage sheet. Show all source → sink connections. What are the main source systems and target/destination systems? Group by pipeline and show the data flow path."),
+
+    ("📈 Table Lineage",
+     """You are an expert ADF Table Lineage Analyst for Tiger Analytics accelerators.
+
+Input: Excel data from ADF Pipeline Analyzer. Focus on these sheets for extracting lineage:
+Activities: Contains granular activity details including Pipeline, ActivityType, SourceTable, SinkTable, SourceLinkedService, SinkLinkedService, ValuesInfo (for intermediate layers), DataFlow (for dataflow names).
+DataFlows: Contains SinkTables for data flows.
+Datasets: Contains LinkedService for datasets.
+LinkedServices: For linked service details.
+
+Task: Extract comprehensive Table-Level Lineage.
+
+─────────────────────────────────────────────────────────────────
+STEP 1 — ANALYZE THE PIPELINE AS A HUMAN DATA ENGINEER
+─────────────────────────────────────────────────────────────────
+Before extracting lineage, fully understand the pipeline flow end to end:
+Identify all activities, their types, execution order, and dependencies.
+Determine whether the pipeline is Sequential, Parallel, or Mixed execution.
+Identify how many hops the data takes before reaching the final target.
+Classify every activity's dataset as belonging to Source Layer, Intermediate Layer, 
+  or Target Layer using the rules below before populating the output table.
+
+─────────────────────────────────────────────────────────────────
+STEP 2 — SCENARIO-BASED SOURCE TABLE EXTRACTION
+─────────────────────────────────────────────────────────────────
+
+SCENARIO 1 — COPY ACTIVITY WITH QUERY ENABLED:
+Check the Activities sheet Query column (sqlReaderQuery or query field) for each Copy Activity.
+If a query is present and populated, extract the base physical table name(s) from the 
+  FROM clause of that query as the Source Table — do NOT use the dataset name in this case.
+If the query contains JOINs, extract ALL tables from FROM and JOIN clauses as source tables.
+If the query contains CTEs (WITH clause), trace through to the base physical table in the 
+  final FROM clause.
+If no query is present, fall back to the SourceTable column value from the Activities sheet.
+Flag dynamic queries with parameters as: @{parameter_name} — Dynamic — Resolve at Runtime.
+
+SCENARIO 2 — MULTIPLE PARALLEL COPY ACTIVITIES WITH QUERIES:
+If the pipeline contains multiple Copy Activities running in parallel (no dependency between 
+  them, or inside a ForEach activity), analyze each one independently.
+For each parallel Copy Activity, extract FROM clause base table(s) from their respective 
+  queries using the same rules as Scenario 1.
+Combine all source tables from all parallel Copy Activities into a single comma-separated 
+  list for the pipeline-level Source Table field.
+In the Activity Level Detail, clearly label which source table belongs to which Copy Activity.
+Example for Source Table field:
+  CopyAct_1: dbo.DimProduct | CopyAct_2: dbo.DimCustomer | CopyAct_3: dbo.DimDate
+  Combined: dbo.DimProduct, dbo.DimCustomer, dbo.DimDate
+
+SCENARIO 3 — MULTI-HOP PIPELINE WITH INTERMEDIATE LAYER:
+Analyze the full pipeline activity sequence to detect multi-hop data movement patterns.
+Apply the following classification:
+
+  SOURCE LAYER:
+  - The originating table or database read in the FIRST Copy/DataFlow activity.
+  - Extract from SourceTable column or FROM clause of the query in the first activity.
+
+  INTERMEDIATE LAYER:
+  - Any ADLS path, Blob Storage path, or staging table that acts as a pass-through 
+    between source and final target.
+  - This is the SINK of the first Copy Activity AND the SOURCE of the next Copy Activity.
+  - From Activities sheet: look for SetVariable / Set Path activities and extract patterns 
+    like "Inbound/GlobalSC/..." from ValuesInfo by concatenating SetContainer + SetPath.
+  - If no intermediate layer exists, populate as: NONE.
+
+  TARGET LAYER:
+  - The final destination table where data lands at the END of the pipeline.
+  - Extract from SinkTable column of the LAST Copy or DataFlow activity in the sequence.
+
+  MULTI-HOP EXAMPLE:
+  Step 1 - CopyActivity_SQLtoADLS : dbo.SalesTransactions → ADLS:/raw/sales/
+  Step 2 - CopyActivity_ADLStoSQL : ADLS:/raw/sales/       → dw.FactSales
+  Result:
+    Source Layer       : dbo.SalesTransactions
+    Intermediate Layer : ADLS:/raw/sales/
+    Target Layer       : dw.FactSales
+
+─────────────────────────────────────────────────────────────────
+STEP 3 — EXTRACT ALL LINEAGE COMPONENTS
+─────────────────────────────────────────────────────────────────
+For each pipeline, extract the following fields:
+
+  * Pipeline Name            : From Activities sheet, Pipeline column.
+
+  * Target Table             : From Activities sheet, SinkTable column for the final 
+                               data-producing activity (last execution stage). 
+                               Cross-reference with DataFlows sheet SinkTables for 
+                               ExecuteDataFlow activities.
+
+  * Target Linked Service    : From Datasets sheet, find LinkedService associated with 
+                               the Target Table's dataset. Fall back to SinkLinkedService 
+                               from the final activity in Activities if not available.
+
+  * Transformation Layer     : From Activities sheet, DataFlow column for ExecuteDataFlow 
+                               activities, or ActivityType for StoredProcedure activities 
+                               at the last execution stage.
+
+  * Intermediate Layer       : From Activities sheet, look for SetVariable or Set Path 
+                               activities. Extract path patterns like "Inbound/GlobalSC/..." 
+                               from ValuesInfo by concatenating SetContainer + SetPath. 
+                               Apply Scenario 3 rules above to identify ADLS or staging 
+                               table intermediate layers. If none, return NONE.
+
+  * Source Table             : Apply Scenario 1 and Scenario 2 rules above.
+                               Priority order:
+                               1. FROM clause of sqlReaderQuery/query if query is present.
+                               2. SourceTable column from Activities sheet if no query.
+                               3. For parallel activities, comma-separated combined list 
+                                  per Scenario 2 rules.
+
+  * Source Linked Service    : From Datasets sheet, find LinkedService associated with 
+                               the Source Table's dataset. Fall back to SourceLinkedService 
+                               from the initial activity in Activities if not available.
+
+─────────────────────────────────────────────────────────────────
+STEP 4 — EDGE CASE HANDLING
+─────────────────────────────────────────────────────────────────
+Stored Procedure as source/sink     : Flag as "Stored Procedure — Manual Review Required"
+Parameterized/dynamic table names   : Flag as "@{parameter_name} — Dynamic — Resolve at Runtime"
+Lookup-driven dynamic source tables : Flag as "Dynamic (Driven by Lookup — <LookupActivityName>)"
+No Copy Activity in pipeline        : Return "Non-Copy Pipeline — No direct table lineage extractable"
+ForEach with inner Copy Activities  : Treat each inner Copy Activity per Scenario 2 rules
+
+─────────────────────────────────────────────────────────────────
+STEP 5 — OUTPUT FORMAT
+─────────────────────────────────────────────────────────────────
+Return a Markdown table in this exact column order:
+
+| Target Table | Target Linked Service Connection | Transformation Layer (dataflow/SP) | Intermediate Layer (Stg table/ADLS) | Source Table | Source Linked Service | Pipeline Name |
+
+Rules for filling the table:
+Source Table     : Apply Scenario 1 (query FROM clause) or Scenario 2 (parallel, comma-separated).
+Intermediate Layer: Apply Scenario 3 (ADLS path / staging table / NONE).
+Target Table     : Final sink table from last activity in the pipeline flow.
+One row per pipeline. If a pipeline has multiple source-to-target paths, add one row per path.
+
+─────────────────────────────────────────────────────────────────
+EXAMPLE OUTPUT ROW:
+─────────────────────────────────────────────────────────────────
+| dr.NHSC_EventMessageHeader | LS_ASA | df_EventMessageHeader | Inbound/GlobalSC/EventMessageHeader | EDW.PRSTM.S6_SC_TM_EVENTMESSAGEHEADER_DM_V | LS_SNOWFLAKE_PROD | pl_EventMessageHeader |
+
+| dw.FactSales | LS_SYNAPSE | NONE | ADLS:/raw/sales/ | dbo.SalesTransactions | LS_SQLSERVER | pl_FullLoad_Sales |
+
+| staging.DimProduct, staging.DimCustomer, staging.DimDate | LS_SYNAPSE | NONE | NONE | dbo.DimProduct, dbo.DimCustomer, dbo.DimDate | LS_SQLSERVER | pl_LoadDimensions |
+
+Be precise, cite activity names and relevant sheet references. 
+Process ALL pipelines in the provided data without skipping any."""),
+
+    ("🔍 Column Lineage",
+     """You are an expert ADF Column Lineage Analyst for Tiger Analytics accelerators.
+
+Input is Excel data from ADF Pipeline Analyzer: sheets with pipelines (Pipelines, PipelineAnalysis), datasets (Datasets, DatasetUsage), copy/data flow activities (Activities, DataFlows, DataFlowLineage, DataLineage), and parameters (GlobalParameters).
+
+Task: Extract GRANULAR COLUMN-LEVEL LINEAGE.
+1. Parse sources (datasets/linkedServices), transformations (mappingDataFlows: derived cols, joins, filters, aggregates; copyActivity projections), targets.
+2. For each target column: Trace origin column(s) from source(s), list transformations (e.g., "UPPER(source.col1) AS target_colA"), data types, lineage path.
+3. Detect gaps: Flag unmapped cols, inferred mappings (e.g., via param@dataset.schema), risks (drift, nulls).
+4. Output:
+   - Markdown table: | Target Dataset | Target Column | Source Dataset(s) | Source Column(s) | Transformations | Data Type | Confidence (0-100) |
+   - Summary: Completeness score, critical paths, modernization recs (e.g., to Fabric/dbt).
+
+Be precise, cite activity names and sheet references."""),
+
+    ("⚠️ Orphaned Resources",
+     "List ALL orphaned resources from every Orphaned* sheet: OrphanedPipelines, OrphanedDataFlows, OrphanedDatasets, OrphanedLinkedServices, OrphanedTriggers. Show the complete list with counts per category."),
+
+    ("🏗️ Complex Pipelines",
+     "Show ALL pipelines ranked by ComplexityScore from PipelineAnalysis. Include: Pipeline name, Folder, TotalActivities, Complexity, ComplexityScore, ImpactLevel, HasDataFlow, HasSQL, SourceSystems, TargetSystems."),
+
+    ("💥 Impact Analysis",
+     "From the ImpactAnalysis sheet, show ALL pipelines with CRITICAL or HIGH ImpactLevel. Include blast radius, upstream/downstream counts, connected triggers, and affected datasets."),
+
+    ("🔄 DataFlow Details",
+     "From DataFlows and DataFlowLineage sheets, show ALL dataflows with their source tables, sink tables, transformations, linked services. Which dataflows are most complex?"),
+
+    ("🗓️ Trigger Schedule",
+     "From the Triggers and TriggerDetails sheets, list ALL triggers with: name, type, state (Started/Stopped), frequency, schedule, and which pipelines they execute. Flag any issues."),
+
+    ("🏥 Full Health Check",
+     "Perform a COMPLETE health check using ALL sheets. Report: (1) Orphaned resource counts, (2) Pipelines with CRITICAL impact but no triggers, (3) Overly complex pipelines, (4) Unused datasets, (5) Misconfigured triggers, (6) Any errors from the Errors sheet.")
